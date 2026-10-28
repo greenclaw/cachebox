@@ -8,7 +8,7 @@ In-memory cache for Python. The hot path is a PyO3 extension (`cachebox._core`);
 - After a behavior change, rebuild with maturin and run pytest.
 - Do not edit `target/`, `*.so`, `__pycache__`, `.venv`, or other build output. Do not edit `Cargo.lock` or `uv.lock` unless a dependency changed.
 - Do not read or write secrets or `.env`.
-- `src/hashbrown/` is vendored hashbrown (see `LICENSE-THIRD-PARTY`). Change it only when the table itself must change.
+- Hash tables are `hashbrown::HashTable` behind the safe helpers in `src/internal/table.rs`; Python `__eq__` errors go through `table::find*`.
 - v6 is the public API. A breaking change needs a note in `docs/docs/migration.md` and a matching update to `cachebox/_core.pyi` and the MkDocs pages.
 - `use-small-offset` is a test-only Cargo feature. Release and publish builds must not enable it.
 
@@ -19,7 +19,7 @@ In-memory cache for Python. The hot path is a PyO3 extension (`cachebox._core`);
 - `src/internal/` — pickle, `OnceInit` (`__new__` / `__init__`), linked list, hash helpers.
 - `cachebox/_cachebox.py` — public `TTLCache` and `VTTLCache` (subclasses of the Rust types). Other classes are re-exported from `_core`.
 - `cachebox/utils.py` and `_wrappers.py` — `@cached`, key makers, stampede locks.
-- `tests/` — pytest mixins shared across implementations. Rust `#[cfg(test)]` covers the vendored table only.
+- `tests/` — pytest mixins shared across implementations. There are no Rust `#[cfg(test)]` tests.
 
 ## Commands
 

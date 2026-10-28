@@ -5,6 +5,28 @@ use std::sync::atomic;
 
 use crate::internal::alias;
 
+#[inline(always)]
+#[cold]
+fn cold_path() {}
+
+/// Branch hint: `b` is expected to be `true`.
+#[inline(always)]
+pub fn likely(b: bool) -> bool {
+    if !b {
+        cold_path();
+    }
+    b
+}
+
+/// Branch hint: `b` is expected to be `false`.
+#[inline(always)]
+pub fn unlikely(b: bool) -> bool {
+    if b {
+        cold_path();
+    }
+    b
+}
+
 /// Tries to hash `arg1`.
 ///
 /// # Safety
@@ -15,7 +37,7 @@ pub unsafe fn pyobject_hash(
     arg1: *mut pyo3::ffi::PyObject,
 ) -> pyo3::PyResult<u64> {
     let py_hash = pyo3::ffi::PyObject_Hash(arg1);
-    if crate::hashbrown::util::unlikely(py_hash == -1) {
+    if unlikely(py_hash == -1) {
         // SAFETY: PyObject_Hash never returns -1 on success.
         return Err(pyo3::PyErr::take(py).unwrap());
     }
@@ -26,8 +48,8 @@ pub unsafe fn pyobject_hash(
 /// Spreads entropy of a Python hash across all 64 bits.
 ///
 /// CPython hashes are frequently low-entropy in the high bits: `hash(n) == n` for
-/// small ints, and many floats/tuples hash to small values. The vendored hashbrown
-/// table takes its 7-bit SIMD control tag from the **top** bits of the hash, so such
+/// small ints, and many floats/tuples hash to small values. hashbrown's
+/// `HashTable` takes its 7-bit SIMD control tag from the **top** bits of the hash, so such
 /// keys all get the same tag and every probe degenerates into a chain of Python
 /// `__eq__` calls. A folded 128-bit multiply (as in foldhash/wyhash) fixes the tag
 /// distribution for ~1 ns. The mixed value never leaves the table.
