@@ -123,6 +123,8 @@ impl BucketCursor {
             }
         }
 
+        // Reached only if the table shrank without a generation bump (a bug).
+        debug_assert_eq!(self.remaining, 0, "table changed during iteration");
         self.remaining = 0;
         None
     }
