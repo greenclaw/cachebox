@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
-use crate::hashbrown;
 use crate::internal::alias;
 use crate::internal::pickle::Builder;
+use crate::internal::table;
 use crate::internal::utils;
 use crate::policies::traits;
 use crate::policies::traits::HandleExt;
@@ -141,8 +141,8 @@ pub struct Occupied<'a> {
     policy: &'a mut TTLPolicy,
     /// The shared configuration
     shared: &'a Shared,
-    /// Raw bucket pointing to the occupied index.
-    bucket: hashbrown::raw::Bucket<usize>,
+    /// Bucket index of the occupied slot; valid until the table is modified.
+    index: usize,
 }
 
 impl traits::OccupiedExt for Occupied<'_> {
@@ -158,7 +158,12 @@ impl traits::OccupiedExt for Occupied<'_> {
         #[cfg(Py_GIL_DISABLED)]
         self.shared.generation_version().increment();
 
-        let item = unsafe { get_handle!(&mut self.policy, *self.bucket.as_ref()) };
+        let index = *self
+            .policy
+            .table
+            .get_bucket(self.index)
+            .expect("occupied bucket index");
+        let item = get_handle!(&mut self.policy, index);
 
         self.policy.currsize = self
             .policy
@@ -173,7 +178,12 @@ impl traits::OccupiedExt for Occupied<'_> {
     fn remove(self) -> Self::Handle {
         self.shared.generation_version().increment();
 
-        let (mut index, _) = unsafe { self.policy.table.remove(self.bucket) };
+        let (mut index, _) = self
+            .policy
+            .table
+            .get_bucket_entry(self.index)
+            .unwrap_or_else(|_| unreachable!("occupied bucket index"))
+            .remove();
         index -= self.policy.front_offset;
 
         self.policy
@@ -213,10 +223,12 @@ impl traits::VacantExt for Vacant<'_> {
 
         self.policy.currsize = self.policy.currsize.saturating_add(handle.size());
 
-        self.policy.table.insert(
+        let policy = &mut *self.policy;
+        let (entries, front_offset) = (&policy.entries, policy.front_offset);
+        policy.table.insert_unique(
             handle.key().hash(),
-            self.policy.entries.len() + self.policy.front_offset,
-            |index| get_handle!(&self.policy, *index).key().hash(),
+            entries.len() + front_offset,
+            |index| entries[*index - front_offset].key().hash(),
         );
         self.policy.entries.push_back(handle);
     }
@@ -224,7 +236,7 @@ impl traits::VacantExt for Vacant<'_> {
 
 pub struct TTLPolicy {
     // Fields are same as `FIFOPolicy`
-    table: hashbrown::raw::RawTable<usize>,
+    table: table::Table<usize>,
     entries: VecDeque<ExpiringHandle>,
     currsize: usize,
     front_offset: usize,
@@ -237,7 +249,7 @@ impl TTLPolicy {
     /// without reallocation.
     pub fn new(capacity: usize) -> Self {
         Self {
-            table: hashbrown::raw::RawTable::with_capacity(capacity),
+            table: table::Table::with_capacity(capacity),
             entries: VecDeque::with_capacity(capacity),
             currsize: 0,
             front_offset: 0,
@@ -245,7 +257,7 @@ impl TTLPolicy {
     }
 
     #[inline]
-    pub fn table(&self) -> &hashbrown::raw::RawTable<usize> {
+    pub fn table(&self) -> &table::Table<usize> {
         &self.table
     }
 
@@ -271,43 +283,35 @@ impl TTLPolicy {
         if (end - start) > self.table.capacity() / 2 {
             // Table-scan
             // normalize every index (subtract fo) and decrement those in range [start, end).
-            unsafe {
-                for bucket in self.table.iter() {
-                    let i = bucket.as_mut();
+            let front_offset = self.front_offset;
+            for i in self.table.iter_mut() {
+                let vd_idx = *i - front_offset;
 
-                    let vd_idx = *i - self.front_offset;
-
-                    *i = if start <= vd_idx && vd_idx < end {
-                        vd_idx - 1 // normalize + decrement
-                    } else {
-                        vd_idx // normalize
-                    };
-                }
+                *i = if start <= vd_idx && vd_idx < end {
+                    vd_idx - 1 // normalize + decrement
+                } else {
+                    vd_idx // normalize
+                };
             }
         } else {
             // Entries-scan
             // decrement the logical indices for entries in range [start, end).
+            let front_offset = self.front_offset;
             let shifted = self.entries.range(start..end);
             for (i, entry) in (start..end).zip(shifted) {
-                let result = unsafe {
-                    self.table
-                        .get_mut(entry.key().hash(), |x| {
-                            Ok::<_, pyo3::PyErr>((*x) - self.front_offset == i)
-                        })
-                        .unwrap_unchecked()
-                        .expect("index not found")
-                };
+                let result = self
+                    .table
+                    .find_mut(entry.key().hash(), |x| (*x) - front_offset == i)
+                    .expect("index not found");
                 *result -= 1;
             }
 
             // normalize every stored index by subtracting `fo`.
             //   - Entries in  [start, end): (vd_idx + fo - 1) - fo  =  vd_idx - 1
             //   - All others:               (vd_idx + fo)     - fo  =  vd_idx
-            if self.front_offset != 0 {
-                unsafe {
-                    for bucket in self.table.iter() {
-                        *bucket.as_mut() -= self.front_offset;
-                    }
+            if front_offset != 0 {
+                for i in self.table.iter_mut() {
+                    *i -= front_offset;
                 }
             }
         }
@@ -324,11 +328,11 @@ impl TTLPolicy {
                 break;
             }
 
-            let eq = |index: &usize| Ok::<_, pyo3::PyErr>((*index - self.front_offset) == 0);
-            let removed_key_table = self.table.remove_entry(handle.key().hash(), eq).unwrap();
-            if hashbrown::util::unlikely(removed_key_table.is_none()) {
-                unreachable!("popitem key not found in table");
-            }
+            let front_offset = self.front_offset;
+            self.table
+                .find_entry(handle.key().hash(), |index| (*index - front_offset) == 0)
+                .unwrap_or_else(|_| unreachable!("popitem key not found in table"))
+                .remove();
 
             gv.increment();
 
@@ -377,10 +381,7 @@ impl PolicyExt for TTLPolicy {
     ) -> pyo3::PyResult<Option<&Self::Handle>> {
         let eq = |index: &usize| get_handle!(&self, *index).key().py_eq(py, key);
 
-        match self
-            .table
-            .get(key.hash(), eq)?
-            .map(|index| get_handle!(&self, *index))
+        match table::find(&self.table, key.hash(), eq)?.map(|index| get_handle!(&self, *index))
         {
             Some(handle) => {
                 if handle.is_expired(std::time::SystemTime::now()) {
@@ -402,12 +403,12 @@ impl PolicyExt for TTLPolicy {
         self.expire(shared.generation_version());
 
         let eq = |index: &usize| get_handle!(&self, *index).key().py_eq(py, key);
-        match self.table.find(key.hash(), eq)? {
-            Some(bucket) => {
+        match table::find_index(&self.table, key.hash(), eq)? {
+            Some(index) => {
                 let result = Occupied {
                     policy: self,
                     shared,
-                    bucket,
+                    index,
                 };
                 Ok(traits::PolicyEntry::Occupied(result))
             }
@@ -429,11 +430,11 @@ impl PolicyExt for TTLPolicy {
 
         let front = unsafe { front.unwrap_unchecked() };
 
-        let eq = |index: &usize| Ok::<_, pyo3::PyErr>(*index - self.front_offset == 0);
-        let removed_key_table = self.table.remove_entry(front.key().hash(), eq).unwrap();
-        if hashbrown::util::unlikely(removed_key_table.is_none()) {
-            unreachable!("popitem key not found in table");
-        }
+        let front_offset = self.front_offset;
+        self.table
+            .find_entry(front.key().hash(), |index| *index - front_offset == 0)
+            .unwrap_or_else(|_| unreachable!("popitem key not found in table"))
+            .remove();
 
         shared.generation_version().increment();
 
@@ -449,8 +450,9 @@ impl PolicyExt for TTLPolicy {
     fn shrink_to_fit(&mut self, shared: &Self::Shared) {
         shared.generation_version().increment();
 
+        let (entries, front_offset) = (&self.entries, self.front_offset);
         self.table
-            .shrink_to(0, |index| get_handle!(&self, *index).key().hash());
+            .shrink_to(0, |index| entries[*index - front_offset].key().hash());
         self.entries.shrink_to_fit();
     }
 
@@ -481,19 +483,18 @@ impl PolicyExt for TTLPolicy {
         let mut error = None;
         let now = std::time::SystemTime::now();
 
-        let result = unsafe {
+        let result = {
             self.table.iter().all(|x| {
-                let handle = get_handle!(&self, *x.as_ref());
+                let handle = get_handle!(&self, *x);
                 if handle.is_expired(now) {
                     return true;
                 }
 
                 let key = handle.key();
 
-                match other
-                    .table
-                    .get(key.hash(), |i| key.py_eq(py, get_handle!(&other, *i).key()))
-                {
+                match table::find(&other.table, key.hash(), |i| {
+                    key.py_eq(py, get_handle!(&other, *i).key())
+                }) {
                     Err(e) => {
                         error = Some(e);
                         false
@@ -502,7 +503,8 @@ impl PolicyExt for TTLPolicy {
                     Ok(Some(i)) => {
                         let v1 = handle.value();
                         let v2 = get_handle!(&other, *i).value();
-                        match utils::pyobject_equal(py, v1.as_ptr(), v2.as_ptr()) {
+                        // SAFETY: both are live Python objects owned by the caches.
+                        match unsafe { utils::pyobject_equal(py, v1.as_ptr(), v2.as_ptr()) } {
                             Ok(eq) => eq,
                             Err(e) => {
                                 error = Some(e);
@@ -597,13 +599,12 @@ impl PolicyExt for TTLPolicy {
 
             slf.currsize = slf.currsize.saturating_add(handle.size());
 
-            unsafe {
-                slf.table.insert_no_grow(
-                    handle.key().hash(),
-                    // Adding `slf.front_offset` is unnecessary here
-                    slf.entries.len(),
-                );
-            }
+            // Adding `slf.front_offset` is unnecessary here
+            let entries = &slf.entries;
+            slf.table
+                .insert_unique(handle.key().hash(), entries.len(), |index| {
+                    entries[*index].key().hash()
+                });
             slf.entries.push_back(handle);
         }
 
