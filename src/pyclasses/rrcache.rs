@@ -555,14 +555,16 @@ impl PyRRCache {
 
     fn items(slf: pyo3::Bound<'_, Self>) -> pyo3::PyResult<pyo3::Py<PyRRCacheItems>> {
         let inner = slf.get().0.get()?;
+        // Read the generation and position the cursor under one lock.
+        let policy = inner.policy_py_attached(slf.py());
         let gv = inner.shared().generation_version().clone();
         let initial_gv = gv.get();
+        let iter = parking_lot::Mutex::new(table::BucketCursor::new(policy.table()));
+        drop(policy);
 
         let result = PyRRCacheItems {
             cache: slf.clone().unbind(),
-            iter: parking_lot::Mutex::new(table::BucketCursor::new(
-                inner.policy_py_attached(slf.py()).table(),
-            )),
+            iter,
             gv,
             initial_gv,
         };
@@ -571,14 +573,16 @@ impl PyRRCache {
 
     fn values(slf: pyo3::Bound<'_, Self>) -> pyo3::PyResult<pyo3::Py<PyRRCacheValues>> {
         let inner = slf.get().0.get()?;
+        // Read the generation and position the cursor under one lock.
+        let policy = inner.policy_py_attached(slf.py());
         let gv = inner.shared().generation_version().clone();
         let initial_gv = gv.get();
+        let iter = parking_lot::Mutex::new(table::BucketCursor::new(policy.table()));
+        drop(policy);
 
         let result = PyRRCacheValues {
             cache: slf.clone().unbind(),
-            iter: parking_lot::Mutex::new(table::BucketCursor::new(
-                inner.policy_py_attached(slf.py()).table(),
-            )),
+            iter,
             gv,
             initial_gv,
         };
@@ -587,14 +591,16 @@ impl PyRRCache {
 
     fn keys(slf: pyo3::Bound<'_, Self>) -> pyo3::PyResult<pyo3::Py<PyRRCacheKeys>> {
         let inner = slf.get().0.get()?;
+        // Read the generation and position the cursor under one lock.
+        let policy = inner.policy_py_attached(slf.py());
         let gv = inner.shared().generation_version().clone();
         let initial_gv = gv.get();
+        let iter = parking_lot::Mutex::new(table::BucketCursor::new(policy.table()));
+        drop(policy);
 
         let result = PyRRCacheKeys {
             cache: slf.clone().unbind(),
-            iter: parking_lot::Mutex::new(table::BucketCursor::new(
-                inner.policy_py_attached(slf.py()).table(),
-            )),
+            iter,
             gv,
             initial_gv,
         };

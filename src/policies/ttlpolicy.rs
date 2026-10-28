@@ -302,7 +302,7 @@ impl TTLPolicy {
                 let result = self
                     .table
                     .find_mut(entry.key().hash(), |x| (*x) - front_offset == i)
-                    .expect("index not found");
+                    .expect("decrement_indexes: shifted entry missing from table");
                 *result -= 1;
             }
 
@@ -331,7 +331,7 @@ impl TTLPolicy {
             let front_offset = self.front_offset;
             self.table
                 .find_entry(handle.key().hash(), |index| (*index - front_offset) == 0)
-                .unwrap_or_else(|_| unreachable!("popitem key not found in table"))
+                .unwrap_or_else(|_| unreachable!("expire: front entry missing from table"))
                 .remove();
 
             gv.increment();
@@ -433,7 +433,7 @@ impl PolicyExt for TTLPolicy {
         let front_offset = self.front_offset;
         self.table
             .find_entry(front.key().hash(), |index| *index - front_offset == 0)
-            .unwrap_or_else(|_| unreachable!("popitem key not found in table"))
+            .unwrap_or_else(|_| unreachable!("evict: front entry missing from table"))
             .remove();
 
         shared.generation_version().increment();

@@ -875,6 +875,8 @@ macro_rules! implement_iterator {
 
                 /// Returns whether any not-expired item is left, without counting them all.
                 fn __bool__(slf: pyo3::PyRef<'_, Self>) -> pyo3::PyResult<bool> {
+                    // Same locking as `__len__`: entries are read below.
+                    let _guard = slf.cache.get().0.get()?.policy_py_attached(slf.py());
                     slf.check_generation()?;
 
                     let now = std::time::SystemTime::now();
