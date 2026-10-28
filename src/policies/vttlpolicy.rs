@@ -1,7 +1,7 @@
-use crate::hashbrown;
 use crate::internal::alias;
 use crate::internal::lazyheap;
 use crate::internal::pickle::Builder;
+use crate::internal::table;
 use crate::internal::utils;
 use crate::policies::traits;
 use crate::policies::traits::HandleExt;
@@ -164,8 +164,8 @@ pub struct Occupied<'a> {
     policy: &'a mut VTTLPolicy,
     /// The shared configuration
     shared: &'a Shared,
-    /// Raw bucket pointing to the occupied index.
-    bucket: hashbrown::raw::Bucket<lazyheap::Cursor<ExpiringHandle>>,
+    /// Bucket index of the occupied slot; valid until the table is modified.
+    index: usize,
 }
 
 impl traits::OccupiedExt for Occupied<'_> {
@@ -181,7 +181,11 @@ impl traits::OccupiedExt for Occupied<'_> {
         self.shared.generation_version().increment();
 
         unsafe {
-            let cursor = self.bucket.as_mut();
+            let cursor = self
+                .policy
+                .table
+                .get_bucket_mut(self.index)
+                .expect("occupied bucket index");
 
             self.policy.currsize = self
                 .policy
@@ -203,7 +207,12 @@ impl traits::OccupiedExt for Occupied<'_> {
     fn remove(self) -> Self::Handle {
         self.shared.generation_version().increment();
 
-        let (cursor, _) = unsafe { self.policy.table.remove(self.bucket) };
+        let (cursor, _) = self
+            .policy
+            .table
+            .get_bucket_entry(self.index)
+            .unwrap_or_else(|_| unreachable!("occupied bucket index"))
+            .remove();
         let item = self.policy.heap.remove(cursor);
 
         self.policy.currsize = self.policy.currsize.saturating_sub(item.size());
@@ -243,13 +252,13 @@ impl traits::VacantExt for Vacant<'_> {
 
         self.policy
             .table
-            .insert(hash, cursor, |x| unsafe { x.element().key().hash() });
+            .insert_unique(hash, cursor, |x| unsafe { x.element().key().hash() });
     }
 }
 
 pub struct VTTLPolicy {
     // Fields are same as `LFUPolicy`
-    table: hashbrown::raw::RawTable<lazyheap::Cursor<ExpiringHandle>>,
+    table: table::Table<lazyheap::Cursor<ExpiringHandle>>,
     heap: lazyheap::LazyHeap<ExpiringHandle>,
     currsize: usize,
 }
@@ -261,14 +270,14 @@ impl VTTLPolicy {
     /// without reallocation.
     pub fn new(capacity: usize) -> Self {
         Self {
-            table: hashbrown::raw::RawTable::with_capacity(capacity),
+            table: table::Table::with_capacity(capacity),
             heap: lazyheap::LazyHeap::new(),
             currsize: 0,
         }
     }
 
     #[inline]
-    pub fn table(&self) -> &hashbrown::raw::RawTable<lazyheap::Cursor<ExpiringHandle>> {
+    pub fn table(&self) -> &table::Table<lazyheap::Cursor<ExpiringHandle>> {
         &self.table
     }
 
@@ -301,10 +310,9 @@ impl VTTLPolicy {
             }
 
             self.table
-                .remove_entry(handle.key.hash(), |x| {
-                    Ok::<_, pyo3::PyErr>(x.as_ptr() == cursor.as_ptr())
-                })
-                .unwrap();
+                .find_entry(handle.key.hash(), |x| x.as_ptr() == cursor.as_ptr())
+                .unwrap_or_else(|_| unreachable!("expire: item not found in table"))
+                .remove();
 
             gv.increment();
 
@@ -341,9 +349,9 @@ impl PolicyExt for VTTLPolicy {
         key: &<Self::Handle as HandleExt>::Key,
         _shared: &Self::Shared,
     ) -> pyo3::PyResult<Option<&Self::Handle>> {
-        let cursor = self
-            .table
-            .get_mut(key.hash(), |x| unsafe { key.py_eq(py, &x.element().key) })?;
+        let cursor = table::find_mut(&mut self.table, key.hash(), |x| unsafe {
+            key.py_eq(py, &x.element().key)
+        })?;
 
         match cursor {
             Some(cursor) => {
@@ -371,12 +379,12 @@ impl PolicyExt for VTTLPolicy {
             key.py_eq(py, cursor.element().key())
         };
 
-        match self.table.find(key.hash(), eq)? {
-            Some(bucket) => {
+        match table::find_index(&self.table, key.hash(), eq)? {
+            Some(index) => {
                 let result = Occupied {
                     policy: self,
                     shared,
-                    bucket,
+                    index,
                 };
                 Ok(traits::PolicyEntry::Occupied(result))
             }
@@ -399,10 +407,11 @@ impl PolicyExt for VTTLPolicy {
             };
 
             self.table
-                .remove_entry(unsafe { front_cursor.element().key.hash() }, |x| {
-                    Ok::<_, pyo3::PyErr>(std::ptr::eq(front_cursor.as_ptr(), x.as_ptr()))
-                })?
-                .expect("evict: item not found in table");
+                .find_entry(unsafe { front_cursor.element().key.hash() }, |x| {
+                    std::ptr::eq(front_cursor.as_ptr(), x.as_ptr())
+                })
+                .unwrap_or_else(|_| unreachable!("evict: item not found in table"))
+                .remove();
         }
 
         shared.generation_version().increment();
@@ -419,7 +428,7 @@ impl PolicyExt for VTTLPolicy {
         }
 
         shared.generation_version().increment();
-        self.table.clear_no_drop();
+        self.table.clear();
         self.heap.clear();
         self.currsize = 0;
     }
@@ -449,7 +458,7 @@ impl PolicyExt for VTTLPolicy {
 
         let result = unsafe {
             self.table.iter().all(|x| {
-                let handle = x.as_ref().element();
+                let handle = x.element();
 
                 if handle.is_expired(now) {
                     return true;
@@ -457,10 +466,9 @@ impl PolicyExt for VTTLPolicy {
 
                 let key = handle.key();
 
-                match other
-                    .table
-                    .get(key.hash(), |c| key.py_eq(py, c.element().key()))
-                {
+                match table::find(&other.table, key.hash(), |c| {
+                    key.py_eq(py, c.element().key())
+                }) {
                     Err(e) => {
                         error = Some(e);
                         false
@@ -487,14 +495,16 @@ impl PolicyExt for VTTLPolicy {
     }
 
     fn clone_ref(&mut self, py: pyo3::Python) -> Self {
-        let mut table = hashbrown::raw::RawTable::with_capacity(self.table.len());
+        let mut table = table::Table::with_capacity(self.table.len());
         let mut heap = lazyheap::LazyHeap::new();
 
         unsafe {
             for cursor in self.heap.iter() {
                 let cloned_handle = cursor.element().clone_ref(py);
                 let new_cursor = heap.push(cloned_handle);
-                table.insert_no_grow(new_cursor.element().key().hash(), new_cursor);
+                table.insert_unique(new_cursor.element().key().hash(), new_cursor, |x| {
+                    x.element().key().hash()
+                });
             }
         }
 
@@ -513,8 +523,8 @@ impl PolicyExt for VTTLPolicy {
     ) -> pyo3::PyResult<()> {
         let mut list = tuple.begin_list()?;
 
-        for cursor in unsafe { self.table.iter() } {
-            let handle = unsafe { cursor.as_ref().element() };
+        for cursor in self.table.iter() {
+            let handle = unsafe { cursor.element() };
 
             let mut tuple = list.begin_tuple(3)?;
             tuple.push(handle.key.as_ref())?;
@@ -571,9 +581,8 @@ impl PolicyExt for VTTLPolicy {
 
             let hash = handle.key().hash();
             let cursor = slf.heap.push(handle);
-            unsafe {
-                slf.table.insert_no_grow(hash, cursor);
-            }
+            slf.table
+                .insert_unique(hash, cursor, |x| unsafe { x.element().key().hash() });
         }
 
         slf.heap.sort_by();

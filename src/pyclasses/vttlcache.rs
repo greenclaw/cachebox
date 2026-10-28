@@ -617,7 +617,7 @@ impl PyVTTLCache {
             policy
                 .table()
                 .iter()
-                .map(|bucket| bucket.as_ref().element())
+                .map(|cursor| cursor.element())
                 .filter(|handle| !handle.is_expired(now))
                 .map(|handle| {
                     (
@@ -780,8 +780,8 @@ impl PyVTTLCache {
             return Ok(());
         };
 
-        for cursor in unsafe { policy.table().iter() } {
-            let handle = unsafe { cursor.as_ref().element() };
+        for cursor in policy.table().iter() {
+            let handle = unsafe { cursor.element() };
 
             visit.call(handle.key().as_ref())?;
             visit.call(handle.value())?;
