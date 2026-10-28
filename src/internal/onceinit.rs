@@ -104,7 +104,7 @@ impl<T> OnceInit<T> {
     /// Returns an error if called before [`set`](Self::set) has completed.
     #[inline]
     pub fn get(&self) -> pyo3::PyResult<&T> {
-        if crate::hashbrown::util::likely(self.0.state.load(atomic::Ordering::Acquire) == INIT) {
+        if crate::internal::utils::likely(self.0.state.load(atomic::Ordering::Acquire) == INIT) {
             // SAFETY: state == INIT guarantees `value` was fully written and is valid.
             Ok(unsafe { (*self.0.value.get()).assume_init_ref() })
         } else {

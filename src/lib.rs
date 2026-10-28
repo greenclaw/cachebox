@@ -2,7 +2,6 @@
 
 #[macro_use]
 mod macro_rules;
-mod hashbrown;
 pub mod internal;
 pub mod policies;
 pub mod pyclasses;

@@ -13,7 +13,6 @@ crate-type = ["cdylib", "rlib"]
 name = "cachebox"
 
 [dependencies]
-allocator-api2 = "0.4.0"
 cfg-if = "1.0.4"
 chrono = "0.4.45"
 fastrand = "2.5.0"
