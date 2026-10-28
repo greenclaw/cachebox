@@ -1,6 +1,6 @@
-use crate::hashbrown;
 use crate::internal::alias;
 use crate::internal::pickle::Builder;
+use crate::internal::table;
 use crate::internal::utils;
 use crate::policies::traits;
 use crate::policies::traits::HandleExt;
@@ -16,8 +16,8 @@ pub struct Occupied<'a> {
     policy: &'a mut NoPolicy,
     /// The shared configuration
     shared: &'a Shared,
-    /// Raw bucket pointing to the occupied slot within the hash table.
-    bucket: hashbrown::raw::Bucket<Handle>,
+    /// Bucket index of the occupied slot; valid until the table is modified.
+    index: usize,
 }
 
 impl traits::OccupiedExt for Occupied<'_> {
@@ -27,7 +27,12 @@ impl traits::OccupiedExt for Occupied<'_> {
     fn remove(self) -> Self::Handle {
         self.shared.generation_version().increment();
 
-        let (h, _) = unsafe { self.policy.table.remove(self.bucket) };
+        let (h, _) = self
+            .policy
+            .table
+            .get_bucket_entry(self.index)
+            .unwrap_or_else(|_| unreachable!("occupied bucket index"))
+            .remove();
         self.policy.currsize = self.policy.currsize.saturating_sub(h.size());
         h
     }
@@ -41,7 +46,12 @@ impl traits::OccupiedExt for Occupied<'_> {
         self.shared.generation_version().increment();
 
         self.policy.currsize = self.policy.currsize.saturating_add(new.size());
-        let old = unsafe { std::mem::replace(self.bucket.as_mut(), new) };
+        let slot = self
+            .policy
+            .table
+            .get_bucket_mut(self.index)
+            .expect("occupied bucket index");
+        let old = std::mem::replace(slot, new);
         self.policy.currsize = self.policy.currsize.saturating_sub(old.size());
 
         old
@@ -54,9 +64,6 @@ pub struct Vacant<'a> {
     policy: &'a mut NoPolicy,
     /// The shared configuration
     shared: &'a Shared,
-    /// If true, means we used `.evict()` method, and empty slots are available
-    /// in table; so we don't need to reserve a new one.
-    space_available: bool,
 }
 
 impl traits::VacantExt for Vacant<'_> {
@@ -78,20 +85,16 @@ impl traits::VacantExt for Vacant<'_> {
         self.shared.generation_version().increment();
         self.policy.currsize = self.policy.currsize.saturating_add(handle.size());
 
-        if !self.space_available {
-            self.policy.table.reserve(1, |x| x.key().hash());
-        }
-        unsafe {
-            self.policy
-                .table
-                .insert_no_grow(handle.key().hash(), handle);
-        }
+        let hash = handle.key().hash();
+        self.policy
+            .table
+            .insert_unique(hash, handle, |x| x.key().hash());
     }
 }
 
 pub struct NoPolicy {
-    /// The raw hash table storing all live [`Handle`] entries.
-    table: hashbrown::raw::RawTable<Handle>,
+    /// The hash table storing all live [`Handle`] entries.
+    table: table::Table<Handle>,
     /// Running total of all stored handles' sizes, maintained incrementally.
     currsize: usize,
 }
@@ -103,14 +106,14 @@ impl NoPolicy {
     /// without reallocation.
     pub fn new(capacity: usize) -> Self {
         Self {
-            table: hashbrown::raw::RawTable::with_capacity(capacity),
+            table: table::Table::with_capacity(capacity),
             currsize: 0,
         }
     }
 
-    /// Returns a reference to the underlying raw hash table.
+    /// Returns a reference to the underlying hash table.
     #[inline(always)]
-    pub fn table(&self) -> &hashbrown::raw::RawTable<Handle> {
+    pub fn table(&self) -> &table::Table<Handle> {
         &self.table
     }
 }
@@ -143,8 +146,7 @@ impl PolicyExt for NoPolicy {
         key: &<Self::Handle as HandleExt>::Key,
         _shared: &Self::Shared,
     ) -> pyo3::PyResult<Option<&Self::Handle>> {
-        let bucket = self.table.find(key.hash(), |x| key.py_eq(py, x.key()))?;
-        Ok(bucket.map(|x| unsafe { x.as_ref() }))
+        table::find(&self.table, key.hash(), |x| key.py_eq(py, x.key()))
     }
 
     fn entry<'a>(
@@ -153,12 +155,12 @@ impl PolicyExt for NoPolicy {
         key: &<Self::Handle as HandleExt>::Key,
         shared: &'a Self::Shared,
     ) -> pyo3::PyResult<traits::PolicyEntry<Self::Occupied<'a>, Self::Vacant<'a>>> {
-        match self.table.find(key.hash(), |x| key.py_eq(py, x.key()))? {
-            Some(bucket) => {
+        match table::find_index(&self.table, key.hash(), |x| key.py_eq(py, x.key()))? {
+            Some(index) => {
                 let result = Occupied {
                     policy: self,
                     shared,
-                    bucket,
+                    index,
                 };
                 Ok(traits::PolicyEntry::Occupied(result))
             }
@@ -166,7 +168,6 @@ impl PolicyExt for NoPolicy {
                 let result = Vacant {
                     policy: self,
                     shared,
-                    space_available: false,
                 };
                 Ok(traits::PolicyEntry::Vacant(result))
             }
@@ -210,18 +211,21 @@ impl PolicyExt for NoPolicy {
 
         let mut error = None;
 
-        let result = unsafe {
-            self.table.iter().map(|x| x.as_ref()).all(|h1| {
+        let result = {
+            self.table.iter().all(|h1| {
                 let key = h1.key();
 
-                match other.table.get(key.hash(), |x| key.py_eq(py, x.key())) {
+                match table::find(&other.table, key.hash(), |x| key.py_eq(py, x.key())) {
                     Err(e) => {
                         error = Some(e);
                         false
                     }
                     Ok(None) => false,
                     Ok(Some(h2)) => {
-                        match utils::pyobject_equal(py, h1.value().as_ptr(), h2.value().as_ptr()) {
+                        // SAFETY: both are live Python objects owned by the tables.
+                        match unsafe {
+                            utils::pyobject_equal(py, h1.value().as_ptr(), h2.value().as_ptr())
+                        } {
                             Ok(eq) => eq,
                             Err(e) => {
                                 error = Some(e);
@@ -237,12 +241,12 @@ impl PolicyExt for NoPolicy {
     }
 
     fn clone_ref(&mut self, py: pyo3::Python<'_>) -> Self {
-        let mut table = hashbrown::raw::RawTable::with_capacity(self.table.capacity());
+        let mut table = table::Table::with_capacity(self.table.capacity());
 
-        unsafe {
-            for handle in self.table.iter().map(|x| x.as_ref()) {
-                table.insert_no_grow(handle.key().hash(), handle.clone_ref(py));
-            }
+        for handle in self.table.iter() {
+            table.insert_unique(handle.key().hash(), handle.clone_ref(py), |x| {
+                x.key().hash()
+            });
         }
 
         Self {
@@ -260,10 +264,8 @@ impl PolicyExt for NoPolicy {
     ) -> pyo3::PyResult<()> {
         let mut dict = tuple.begin_dict()?;
 
-        unsafe {
-            for handle in self.table.iter().map(|x| x.as_ref()) {
-                dict.entry(handle.key().as_ref(), handle.value())?;
-            }
+        for handle in self.table.iter() {
+            dict.entry(handle.key().as_ref(), handle.value())?;
         }
 
         dict.end()
@@ -295,9 +297,8 @@ impl PolicyExt for NoPolicy {
             let handle = Handle::new(key.py(), shared.getsizeof(), key.unbind(), value.unbind())?;
 
             slf.currsize = slf.currsize.saturating_add(handle.size());
-            unsafe {
-                slf.table.insert_no_grow(handle.key().hash(), handle);
-            }
+            let hash = handle.key().hash();
+            slf.table.insert_unique(hash, handle, |x| x.key().hash());
         }
 
         Ok((shared, slf))

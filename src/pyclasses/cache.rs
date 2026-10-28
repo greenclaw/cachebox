@@ -1,5 +1,6 @@
 use crate::internal::alias;
 use crate::internal::onceinit;
+use crate::internal::table;
 use crate::internal::utils;
 use crate::policies::nopolicy;
 use crate::policies::traits::HandleExt;
@@ -556,11 +557,10 @@ impl PyCache {
         let initial_gv = gv.get();
 
         let result = PyCacheItems {
-            cache: slf.as_any().clone().unbind(),
-            // SAFETY: We cannot use lifetimes here, but we're tracking changes using [`GenerationVersion`]
-            iter: parking_lot::Mutex::new(unsafe {
-                inner.policy_py_attached(slf.py()).table().iter()
-            }),
+            cache: slf.clone().unbind(),
+            iter: parking_lot::Mutex::new(table::BucketCursor::new(
+                inner.policy_py_attached(slf.py()).table(),
+            )),
             gv,
             initial_gv,
         };
@@ -574,11 +574,10 @@ impl PyCache {
         let initial_gv = gv.get();
 
         let result = PyCacheValues {
-            cache: slf.as_any().clone().unbind(),
-            // SAFETY: We cannot use lifetimes here, but we're tracking changes using [`GenerationVersion`]
-            iter: parking_lot::Mutex::new(unsafe {
-                inner.policy_py_attached(slf.py()).table().iter()
-            }),
+            cache: slf.clone().unbind(),
+            iter: parking_lot::Mutex::new(table::BucketCursor::new(
+                inner.policy_py_attached(slf.py()).table(),
+            )),
             gv,
             initial_gv,
         };
@@ -591,11 +590,10 @@ impl PyCache {
         let initial_gv = gv.get();
 
         let result = PyCacheKeys {
-            cache: slf.as_any().clone().unbind(),
-            // SAFETY: We cannot use lifetimes here, but we're tracking changes using [`GenerationVersion`]
-            iter: parking_lot::Mutex::new(unsafe {
-                inner.policy_py_attached(slf.py()).table().iter()
-            }),
+            cache: slf.clone().unbind(),
+            iter: parking_lot::Mutex::new(table::BucketCursor::new(
+                inner.policy_py_attached(slf.py()).table(),
+            )),
             gv,
             initial_gv,
         };
@@ -636,12 +634,8 @@ impl PyCache {
         let shared = inner.shared();
         let policy = inner.policy_py_attached(slf.py());
 
-        let iter = unsafe {
-            policy
-                .table()
-                .iter()
-                .map(|bucket| bucket.as_ref())
-                .map(|handle| {
+        let iter = {
+            policy.table().iter().map(|handle| {
                     (
                         // Without using `.bind` it returns something like `Py(addr)`
                         handle.key().as_ref().bind(slf.py()),
@@ -668,8 +662,7 @@ impl PyCache {
             return Ok(());
         };
 
-        for handle_ref in unsafe { policy.table().iter() } {
-            let handle = unsafe { handle_ref.as_ref() };
+        for handle in policy.table().iter() {
 
             visit.call(handle.key().as_ref())?;
             visit.call(handle.value())?;
@@ -698,10 +691,10 @@ macro_rules! implement_iterator {
         $(
             implement_pyclass! {
                 [generic, frozen] $name as $pyname {
-                    cache: pyo3::Py<pyo3::PyAny>,
+                    cache: pyo3::Py<PyCache>,
                     initial_gv: u32,
                     gv: utils::GenerationVersion,
-                    iter: parking_lot::Mutex<crate::hashbrown::raw::RawIter<nopolicy::Handle>>,
+                    iter: parking_lot::Mutex<table::BucketCursor>,
                 }
             }
 
@@ -721,12 +714,14 @@ macro_rules! implement_iterator {
                 fn __next__(slf: pyo3::PyRef<'_, Self>) -> pyo3::PyResult<$rt_type> {
                     slf.check_generation()?;
 
+                    let py = slf.py();
+                    let inner = slf.cache.get().0.get()?;
+                    let policy = inner.policy_py_attached(py);
                     let mut iter = slf.iter.lock();
 
-                    match iter.next() {
-                        Some(x) => {
-                            let $py = slf.py();
-                            let $handle = unsafe { x.as_ref() };
+                    match iter.next(policy.table()) {
+                        Some($handle) => {
+                            let $py = py;
                             Ok($init)
                         }
                         None => return Err(new_py_error!(PyStopIteration, ())),
