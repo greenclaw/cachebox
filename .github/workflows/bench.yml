@@ -1,6 +1,8 @@
 name: Bench
 
 on:
+  push:
+    branches: [proto/all-bench]
   workflow_dispatch:
     inputs:
       rounds:
@@ -41,7 +43,7 @@ jobs:
       - name: "Build both and benchmark"
         shell: bash
         env:
-          ROUNDS: ${{ inputs.rounds }}
+          ROUNDS: ${{ inputs.rounds || '3' }}
         run: |
           uv run --no-project --python 3.13 python proto/.bench/run.py base proto "$ROUNDS"
 
