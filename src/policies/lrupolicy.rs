@@ -1,7 +1,7 @@
-use crate::hashbrown;
 use crate::internal::alias;
 use crate::internal::linked_list;
 use crate::internal::pickle::Builder;
+use crate::internal::table;
 use crate::internal::utils;
 use crate::policies::traits;
 use crate::policies::traits::HandleExt;
@@ -17,8 +17,8 @@ pub struct Occupied<'a> {
     policy: &'a mut LRUPolicy,
     /// The shared configuration
     shared: &'a Shared,
-    /// Raw bucket pointing to the occupied index.
-    bucket: hashbrown::raw::Bucket<linked_list::Cursor<Handle>>,
+    /// Bucket index of the occupied slot; valid until the table is modified.
+    index: usize,
 }
 
 impl traits::OccupiedExt for Occupied<'_> {
@@ -29,7 +29,11 @@ impl traits::OccupiedExt for Occupied<'_> {
         self.shared.generation_version().increment();
 
         unsafe {
-            let mut cursor = *self.bucket.as_ref();
+            let mut cursor = *self
+                .policy
+                .table
+                .get_bucket(self.index)
+                .expect("occupied bucket index");
 
             self.policy.currsize = self
                 .policy
@@ -48,7 +52,12 @@ impl traits::OccupiedExt for Occupied<'_> {
     fn remove(self) -> Self::Handle {
         self.shared.generation_version().increment();
 
-        let (cursor, _) = unsafe { self.policy.table.remove(self.bucket) };
+        let (cursor, _) = self
+            .policy
+            .table
+            .get_bucket_entry(self.index)
+            .unwrap_or_else(|_| unreachable!("occupied bucket index"))
+            .remove();
         let item = unsafe { cursor.unlink(&mut self.policy.list) };
 
         self.policy.currsize = self.policy.currsize.saturating_sub(item.size());
@@ -89,13 +98,13 @@ impl traits::VacantExt for Vacant<'_> {
 
         self.policy
             .table
-            .insert(hash, cursor, |x| unsafe { x.element().key().hash() });
+            .insert_unique(hash, cursor, |x| unsafe { x.element().key().hash() });
     }
 }
 
 pub struct LRUPolicy {
     /// Maps each key to its node pointer into [`LRUPolicy::list`], enabling O(1) lookups.
-    table: hashbrown::raw::RawTable<linked_list::Cursor<Handle>>,
+    table: table::Table<linked_list::Cursor<Handle>>,
 
     /// A doubly-linked list, which holds cached handles, providing O(1) pops (front/back) and pushes (front/back).
     list: linked_list::LinkedList<Handle>,
@@ -111,14 +120,14 @@ impl LRUPolicy {
     /// without reallocation.
     pub fn new(capacity: usize) -> Self {
         Self {
-            table: hashbrown::raw::RawTable::with_capacity(capacity),
+            table: table::Table::with_capacity(capacity),
             list: linked_list::LinkedList::new(),
             currsize: 0,
         }
     }
 
     #[inline]
-    pub fn table(&self) -> &hashbrown::raw::RawTable<linked_list::Cursor<Handle>> {
+    pub fn table(&self) -> &table::Table<linked_list::Cursor<Handle>> {
         &self.table
     }
 
@@ -133,13 +142,11 @@ impl LRUPolicy {
         py: pyo3::Python,
         key: &utils::PrecomputedHashObject,
     ) -> pyo3::PyResult<Option<&Handle>> {
-        unsafe {
-            let bucket = self
-                .table
-                .find(key.hash(), |cursor| key.py_eq(py, cursor.element().key()))?;
+        let cursor = table::find(&self.table, key.hash(), |cursor| unsafe {
+            key.py_eq(py, cursor.element().key())
+        })?;
 
-            Ok(bucket.map(|x| x.as_ref().element()))
-        }
+        Ok(cursor.map(|x| unsafe { x.element() }))
     }
 }
 
@@ -171,12 +178,13 @@ impl PolicyExt for LRUPolicy {
         key: &<Self::Handle as HandleExt>::Key,
         shared: &Self::Shared,
     ) -> pyo3::PyResult<Option<&Self::Handle>> {
-        unsafe {
-            let bucket = self
-                .table
-                .get(key.hash(), |cursor| key.py_eq(py, cursor.element().key()))?;
+        let cursor = table::find(&self.table, key.hash(), |cursor| unsafe {
+            key.py_eq(py, cursor.element().key())
+        })?
+        .copied();
 
-            match bucket {
+        unsafe {
+            match cursor {
                 Some(cursor) => {
                     // moving the entry is a mutation, so it bumps the generation like
                     // any other; a hit on the most recent entry moves nothing
@@ -201,12 +209,12 @@ impl PolicyExt for LRUPolicy {
         let eq =
             |cursor: &linked_list::Cursor<Handle>| unsafe { key.py_eq(py, cursor.element().key()) };
 
-        match self.table.find(key.hash(), eq)? {
-            Some(bucket) => {
+        match table::find_index(&self.table, key.hash(), eq)? {
+            Some(index) => {
                 let result = Occupied {
                     policy: self,
                     shared,
-                    bucket,
+                    index,
                 };
                 Ok(traits::PolicyEntry::Occupied(result))
             }
@@ -231,8 +239,9 @@ impl PolicyExt for LRUPolicy {
 
             shared.generation_version().increment();
             self.table
-                .remove_entry(hash, |cursor| Ok::<_, pyo3::PyErr>(*cursor == front_cursor))
-                .expect("evict: key not found in table.");
+                .find_entry(hash, |cursor| *cursor == front_cursor)
+                .unwrap_or_else(|_| unreachable!("evict: key not found in table."))
+                .remove();
         }
 
         let handle = unsafe { self.list.pop_front().unwrap_unchecked() };
@@ -253,7 +262,7 @@ impl PolicyExt for LRUPolicy {
         }
 
         shared.generation_version().increment();
-        self.table.clear_no_drop();
+        self.table.clear();
         self.list.clear();
         self.currsize = 0;
     }
@@ -273,13 +282,12 @@ impl PolicyExt for LRUPolicy {
 
         let result = unsafe {
             self.table.iter().all(|x| {
-                let handle = x.as_ref().element();
+                let handle = x.element();
                 let key = handle.key();
 
-                match other
-                    .table
-                    .get(key.hash(), |c| key.py_eq(py, c.element().key()))
-                {
+                match table::find(&other.table, key.hash(), |c| {
+                    key.py_eq(py, c.element().key())
+                }) {
                     Err(e) => {
                         error = Some(e);
                         false
@@ -304,14 +312,16 @@ impl PolicyExt for LRUPolicy {
     }
 
     fn clone_ref(&mut self, py: pyo3::Python<'_>) -> Self {
-        let mut table = hashbrown::raw::RawTable::with_capacity(self.list.len());
+        let mut table = table::Table::with_capacity(self.list.len());
         let mut entries = linked_list::LinkedList::new();
 
         unsafe {
             for cursor in self.list.iter() {
                 let cloned_handle = cursor.element().clone_ref(py);
                 let new_cursor = entries.push_back(cloned_handle);
-                table.insert_no_grow(new_cursor.element().key().hash(), new_cursor);
+                table.insert_unique(new_cursor.element().key().hash(), new_cursor, |x| {
+                    x.element().key().hash()
+                });
             }
         }
 
@@ -376,9 +386,8 @@ impl PolicyExt for LRUPolicy {
             let hash = handle.key().hash();
             let cursor = slf.list.push_back(handle);
 
-            unsafe {
-                slf.table.insert_no_grow(hash, cursor);
-            }
+            slf.table
+                .insert_unique(hash, cursor, |x| unsafe { x.element().key().hash() });
         }
 
         Ok((shared, slf))
