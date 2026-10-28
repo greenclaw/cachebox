@@ -1,5 +1,6 @@
 use crate::internal::alias;
 use crate::internal::onceinit;
+use crate::internal::table;
 use crate::internal::utils;
 use crate::policies::rrpolicy;
 use crate::policies::traits::HandleExt;
@@ -555,10 +556,9 @@ impl PyRRCache {
 
         let policy = inner.policy_py_attached(slf.py());
 
-        // SAFETY: We cannot use lifetimes here, but we're tracking changes using [`GenerationVersion`]
         let result = PyRRCacheItems {
             cache: slf.clone().unbind(),
-            iter: parking_lot::Mutex::new(unsafe { policy.table().iter() }),
+            iter: parking_lot::Mutex::new(table::BucketCursor::new(policy.table())),
             initial_gv: inner.shared().generation_version().get(),
         };
         pyo3::Py::new(slf.py(), result)
@@ -569,10 +569,9 @@ impl PyRRCache {
 
         let policy = inner.policy_py_attached(slf.py());
 
-        // SAFETY: We cannot use lifetimes here, but we're tracking changes using [`GenerationVersion`]
         let result = PyRRCacheValues {
             cache: slf.clone().unbind(),
-            iter: parking_lot::Mutex::new(unsafe { policy.table().iter() }),
+            iter: parking_lot::Mutex::new(table::BucketCursor::new(policy.table())),
             initial_gv: inner.shared().generation_version().get(),
         };
         pyo3::Py::new(slf.py(), result)
@@ -583,10 +582,9 @@ impl PyRRCache {
 
         let policy = inner.policy_py_attached(slf.py());
 
-        // SAFETY: We cannot use lifetimes here, but we're tracking changes using [`GenerationVersion`]
         let result = PyRRCacheKeys {
             cache: slf.clone().unbind(),
-            iter: parking_lot::Mutex::new(unsafe { policy.table().iter() }),
+            iter: parking_lot::Mutex::new(table::BucketCursor::new(policy.table())),
             initial_gv: inner.shared().generation_version().get(),
         };
         pyo3::Py::new(slf.py(), result)
@@ -626,12 +624,8 @@ impl PyRRCache {
         let shared = inner.shared();
         let policy = inner.policy_py_attached(slf.py());
 
-        let iter = unsafe {
-            policy
-                .table()
-                .iter()
-                .map(|bucket| bucket.as_ref())
-                .map(|handle| {
+        let iter = {
+            policy.table().iter().map(|handle| {
                     (
                         // Without using `.bind` it returns something like `Py(addr)`
                         handle.key().as_ref().bind(slf.py()),
@@ -654,11 +648,10 @@ impl PyRRCache {
         let inner = self.0.get()?;
         let policy = inner.policy_py_attached(py);
 
-        let bucket = policy
-            .random_bucket()
+        let handle = table::random_index(policy.table())
+            .and_then(|i| policy.table().get_bucket(i))
             .ok_or_else(|| new_py_error!(PyKeyError, "cache is empty"))?;
 
-        let handle = unsafe { bucket.as_ref() };
         Ok(handle.key().clone_ref(py).into())
     }
 
@@ -671,8 +664,7 @@ impl PyRRCache {
             return Ok(());
         };
 
-        for handle_ref in unsafe { policy.table().iter() } {
-            let handle = unsafe { handle_ref.as_ref() };
+        for handle in policy.table().iter() {
 
             visit.call(handle.key().as_ref())?;
             visit.call(handle.value())?;
@@ -703,7 +695,7 @@ macro_rules! implement_iterator {
                 [generic, frozen] $name as $pyname {
                     cache: pyo3::Py<PyRRCache>,
                     initial_gv: u32,
-                    iter: parking_lot::Mutex<crate::hashbrown::raw::RawIter<rrpolicy::Handle>>,
+                    iter: parking_lot::Mutex<table::BucketCursor>,
                 }
             }
 
@@ -721,14 +713,13 @@ macro_rules! implement_iterator {
                 }
 
                 fn __next__(&self, py: pyo3::Python) -> pyo3::PyResult<$rt_type> {
-                    let _policy = self.lock_and_check(py)?;
+                    let policy = self.lock_and_check(py)?;
 
                     let mut iter = pyo3::sync::MutexExt::lock_py_attached(&self.iter, py);
 
-                    match iter.next() {
-                        Some(x) => {
+                    match iter.next(policy.table()) {
+                        Some($handle) => {
                             let $py = py;
-                            let $handle = unsafe { x.as_ref() };
                             Ok($init)
                         }
                         None => return Err(new_py_error!(PyStopIteration, ())),
