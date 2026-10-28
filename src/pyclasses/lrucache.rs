@@ -586,7 +586,7 @@ impl PyLRUCache {
 
         // SAFETY: We cannot use lifetimes here, but we're tracking changes using [`GenerationVersion`]
         let result = PyLRUCacheItems {
-            cache: slf.as_any().clone().unbind(),
+            cache: slf.clone().unbind(),
             iter: parking_lot::Mutex::new(unsafe {
                 inner.policy_py_attached(slf.py()).list().iter()
             }),
@@ -603,7 +603,7 @@ impl PyLRUCache {
 
         // SAFETY: We cannot use lifetimes here, but we're tracking changes using [`GenerationVersion`]
         let result = PyLRUCacheValues {
-            cache: slf.as_any().clone().unbind(),
+            cache: slf.clone().unbind(),
             iter: parking_lot::Mutex::new(unsafe {
                 inner.policy_py_attached(slf.py()).list().iter()
             }),
@@ -620,7 +620,7 @@ impl PyLRUCache {
 
         // SAFETY: We cannot use lifetimes here, but we're tracking changes using [`GenerationVersion`]
         let result = PyLRUCacheKeys {
-            cache: slf.as_any().clone().unbind(),
+            cache: slf.clone().unbind(),
             iter: parking_lot::Mutex::new(unsafe {
                 inner.policy_py_attached(slf.py()).list().iter()
             }),
@@ -770,7 +770,7 @@ macro_rules! implement_iterator {
         $(
             implement_pyclass! {
                 [generic, frozen] $name as $pyname {
-                    cache: pyo3::Py<pyo3::PyAny>,
+                    cache: pyo3::Py<PyLRUCache>,
                     initial_gv: u32,
                     gv: utils::GenerationVersion,
                     iter: parking_lot::Mutex<linked_list::RawIter<lrupolicy::Handle>>,
@@ -791,6 +791,10 @@ macro_rules! implement_iterator {
                 }
 
                 fn __next__(slf: pyo3::PyRef<'_, Self>) -> pyo3::PyResult<$rt_type> {
+                    // Hold the cache lock while checking the generation and reading the
+                    // element: mutations bump the generation under the same lock, so a
+                    // matching generation means the position is still valid.
+                    let _guard = slf.cache.get().0.get()?.policy_py_attached(slf.py());
                     slf.check_generation()?;
 
                     let mut iter = slf.iter.lock();

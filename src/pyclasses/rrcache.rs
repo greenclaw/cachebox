@@ -725,11 +725,12 @@ macro_rules! implement_iterator {
                 }
 
                 fn __next__(slf: pyo3::PyRef<'_, Self>) -> pyo3::PyResult<$rt_type> {
-                    slf.check_generation()?;
-
                     let py = slf.py();
                     let inner = slf.cache.get().0.get()?;
+                    // Check the generation under the cache lock: mutations bump it under
+                    // the same lock, so the cursor position is still meaningful.
                     let policy = inner.policy_py_attached(py);
+                    slf.check_generation()?;
                     let mut iter = slf.iter.lock();
 
                     match iter.next(policy.table()) {
