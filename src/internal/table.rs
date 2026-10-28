@@ -41,6 +41,28 @@ pub fn find<T>(
     Ok(find_index(table, hash, eq)?.and_then(|i| table.get_bucket(i)))
 }
 
+/// Returns a mutable reference to the entry for which `eq` returns `Ok(true)`.
+#[inline]
+pub fn find_mut<T>(
+    table: &mut Table<T>,
+    hash: u64,
+    mut eq: impl FnMut(&T) -> pyo3::PyResult<bool>,
+) -> pyo3::PyResult<Option<&mut T>> {
+    let mut error = None;
+    let found = table.find_mut(hash, |x| match eq(x) {
+        Ok(found) => found,
+        Err(e) => {
+            error = Some(e);
+            true
+        }
+    });
+
+    match error {
+        Some(e) => Err(e),
+        None => Ok(found),
+    }
+}
+
 /// Random bucket probes before [`random_index`] falls back to an O(n) pick.
 const RANDOM_PROBES: usize = 32;
 
