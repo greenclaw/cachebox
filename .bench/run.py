@@ -34,7 +34,7 @@ def build(src: Path) -> Path:
 
 
 def main() -> None:
-    base, proto = Path(sys.argv[1]), Path(sys.argv[2])
+    base, proto = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
     rounds = int(sys.argv[3]) if len(sys.argv) > 3 else 3
     pys = {"main": build(base), "proto": build(proto)}
     best: dict[str, dict[str, int]] = {"main": {}, "proto": {}}
