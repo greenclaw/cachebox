@@ -3,6 +3,7 @@ use std::alloc::dealloc;
 use std::alloc::handle_alloc_error;
 use std::alloc::Layout;
 use std::marker::PhantomData;
+use std::mem;
 use std::ptr::NonNull;
 use std::ptr::{self};
 
@@ -211,23 +212,20 @@ impl<T> LinkedList<T> {
     fn drop_nodes(&mut self) {
         let s = self.sentinel.as_ptr();
         while self.len != 0 {
-            let element = unsafe {
+            unsafe {
                 // SAFETY: `self.len != 0`, so `(*s).next` points to a real node.
                 let node = (*s).next;
                 let second = (*node).next;
                 (*second).prev = s;
                 (*s).next = second;
 
+                let node_ptr = node as *mut Node<T>;
                 // SAFETY: layout-compatible (see `Node` docs); `element` still init.
-                let element = ptr::read(&(*(node as *mut Node<T>)).element);
-                // SAFETY: element moved out above; node already unlinked.
+                ptr::drop_in_place(&mut (*node_ptr).element);
+                // SAFETY: element dropped above; node already unlinked.
                 self.recycle_node(node);
-                element
-            };
+            }
             self.len -= 1;
-            // Dropped last: if this panics, the list is already consistent and
-            // the drop guard can carry on.
-            drop(element);
         }
     }
 
@@ -441,22 +439,17 @@ impl<T> LinkedList<T> {
     }
 }
 
-// Frees the rest of the list when it goes out of scope, which also covers an
-// element destructor panicking in `LinkedList::drop`: the remaining elements,
-// the free list and the sentinel are freed either way.
+// Guard ensures that if dropping an element panics, we still free
+// the free-list allocations instead of leaking them (the sentinel
+// is freed unconditionally below regardless of panics).
 struct DropGuard<'a, T>(&'a mut LinkedList<T>);
 
 impl<'a, T> Drop for DropGuard<'a, T> {
     fn drop(&mut self) {
         self.0.drop_nodes();
-        unsafe {
-            // SAFETY: the list is being destroyed; no other references to the
-            // free list exist, satisfying `drop_freelist`'s contract.
-            self.0.drop_freelist();
-            // SAFETY: `sentinel` was allocated in `new` with exactly this
-            // layout and is never dereferenced after this point.
-            dealloc(self.0.sentinel.as_ptr() as *mut u8, Layout::new::<Links>());
-        }
+        // SAFETY: `self` is being torn down during unwind; no other
+        // references to the free list exist, satisfying `drop_freelist`'s contract.
+        unsafe { self.0.drop_freelist() };
     }
 }
 
@@ -464,7 +457,16 @@ impl<T> Drop for LinkedList<T> {
     fn drop(&mut self) {
         let guard = DropGuard(self);
         guard.0.drop_nodes();
-        // `guard` drops here and frees the free list and the sentinel.
+        // SAFETY: `drop_nodes` completed without panicking; the free list is
+        // only touched here and then never again (guard is forgotten next).
+        unsafe { guard.0.drop_freelist() };
+        mem::forget(guard);
+        // SAFETY: `self.sentinel` was allocated in `new` with exactly this
+        // layout (`Layout::new::<Links>()`), and after this point `self` is
+        // being destroyed, so the pointer is never dereferenced again.
+        unsafe {
+            dealloc(self.sentinel.as_ptr() as *mut u8, Layout::new::<Links>());
+        }
     }
 }
 
