@@ -3,7 +3,7 @@ name: Rust Test
 on:
   pull_request:
   push:
-    branches: ["probe/rust-ci"]
+    branches: ["probe/rust-ci-2"]
   workflow_dispatch:
 
 permissions:
