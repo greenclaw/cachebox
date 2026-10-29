@@ -81,7 +81,11 @@ jobs:
         # the interpreter is not instrumented: preload the runtime, let malloc
         # see every allocation, and skip leak reports from CPython itself
         run: |
-          ASAN_LIB="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/lib/librustc-nightly_rt.asan.so"
+          # Rust ships the Linux ASan runtime only as a static archive, which a
+          # cdylib does not link; preload clang's shared runtime instead.
+          find "$(rustc --print sysroot)" -name '*asan*'
+          clang --version | head -1
+          ASAN_LIB="$(clang -print-file-name=libclang_rt.asan-x86_64.so)"
           ls -l "$ASAN_LIB"
           LD_PRELOAD="$ASAN_LIB" pytest -v -n auto
         env:
