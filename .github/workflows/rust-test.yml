@@ -2,6 +2,8 @@ name: Rust Test
 
 on:
   pull_request:
+  push:
+    branches: ["probe/rust-ci"]
   workflow_dispatch:
 
 permissions:
