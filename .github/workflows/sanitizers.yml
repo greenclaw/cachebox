@@ -87,7 +87,10 @@ jobs:
           clang --version | head -1
           ASAN_LIB="$(clang -print-file-name=libclang_rt.asan-x86_64.so)"
           ls -l "$ASAN_LIB"
+          # free-threaded builds always use mimalloc: ASan then sees the Rust
+          # allocations but not Python objects
+          if [[ "$PY_VERSION" != *t ]]; then export PYTHONMALLOC=malloc; fi
           LD_PRELOAD="$ASAN_LIB" pytest -v -n auto
         env:
-          PYTHONMALLOC: malloc
+          PY_VERSION: ${{ matrix.python-version }}
           ASAN_OPTIONS: detect_leaks=0
