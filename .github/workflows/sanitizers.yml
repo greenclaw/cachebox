@@ -11,6 +11,8 @@ permissions:
 env:
   RUST_BACKTRACE: 1
   UV_PYTHON_DOWNLOADS: 0
+  # rust-toolchain.toml pins stable; sanitizers and Miri need nightly
+  RUSTUP_TOOLCHAIN: nightly
 
 jobs:
   miri:
