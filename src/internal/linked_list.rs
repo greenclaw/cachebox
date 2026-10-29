@@ -659,3 +659,42 @@ unsafe impl<T: Send + Send> Send for RawIter<T> {}
 unsafe impl<T: Sync + Sync> Sync for RawIter<T> {}
 unsafe impl<T: Send + Send> Send for Cursor<T> {}
 unsafe impl<T: Sync + Sync> Sync for Cursor<T> {}
+
+#[cfg(test)]
+mod tests {
+    use super::LinkedList;
+
+    fn values(list: &LinkedList<String>) -> Vec<String> {
+        unsafe { list.iter().map(|c| c.element().clone()).collect() }
+    }
+
+    #[test]
+    fn push_pop_move_unlink_iter() {
+        let mut list = LinkedList::new();
+        let a = list.push_back("a".to_string());
+        let b = list.push_back("b".to_string());
+        let _c = list.push_front("c".to_string());
+        assert_eq!(values(&list), ["c", "a", "b"]);
+
+        unsafe {
+            b.move_to_front(&mut list);
+            a.move_to_back(&mut list);
+            assert!(a.is_back(&list));
+        }
+        assert_eq!(values(&list), ["b", "c", "a"]);
+
+        assert_eq!(unsafe { b.unlink(&mut list) }, "b");
+        assert_eq!(list.pop_front().as_deref(), Some("c"));
+        // freed nodes are reused
+        list.push_front("d".to_string());
+        list.push_back("e".to_string());
+        assert_eq!(values(&list), ["d", "a", "e"]);
+        assert_eq!(list.pop_back().as_deref(), Some("e"));
+        assert_eq!(list.len(), 2);
+
+        list.clear();
+        assert!(list.is_empty());
+        list.push_back("f".to_string());
+        // dropped with one element and a free list: no leak, no double free
+    }
+}
