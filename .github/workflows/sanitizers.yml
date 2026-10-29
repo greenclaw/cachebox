@@ -1,0 +1,87 @@
+name: Sanitizers
+
+on:
+  push:
+    branches: ["probe/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+  UV_PYTHON_DOWNLOADS: 0
+
+jobs:
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@nightly # zizmor: ignore[unpinned-uses]
+        with:
+          components: miri, rust-src
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: "Run Miri on the Rust unit tests"
+        run: |
+          cargo miri setup
+          PYO3_PYTHON="$(which python3)" cargo miri test --no-default-features --lib
+
+  asan:
+    name: asan ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14t"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@nightly # zizmor: ignore[unpinned-uses]
+        with:
+          components: rust-src
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+
+      - name: "Install uv"
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: false
+
+      - name: "Create and activate .venv"
+        run: |
+          uv venv .venv --python ${{ matrix.python-version }}
+          echo ".venv/bin" >> "$GITHUB_PATH"
+          echo "PYO3_PYTHON=.venv/bin/python3" >> "$GITHUB_ENV"
+
+      - name: "Install dependencies"
+        run: uv pip install --group ci
+
+      - name: "Build with AddressSanitizer"
+        # --target keeps the sanitizer out of build scripts and proc macros
+        run: maturin develop --features use-small-offset --target x86_64-unknown-linux-gnu
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+
+      - name: "Run pytest under ASan"
+        # the interpreter is not instrumented: preload the runtime, let malloc
+        # see every allocation, and skip leak reports from CPython itself
+        run: |
+          ASAN_LIB="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/lib/librustc-nightly_rt.asan.so"
+          ls -l "$ASAN_LIB"
+          LD_PRELOAD="$ASAN_LIB" pytest -v -n auto
+        env:
+          PYTHONMALLOC: malloc
+          ASAN_OPTIONS: detect_leaks=0
