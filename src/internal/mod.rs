@@ -3,5 +3,5 @@ pub mod lazyheap;
 pub mod linked_list;
 pub mod onceinit;
 pub mod pickle;
-pub mod utils;
 pub mod table;
+pub mod utils;

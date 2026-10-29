@@ -669,17 +669,14 @@ impl PyLFUCache {
         // We cannot use heap.iter here, because it requires re-sorting
         // and this can lead to intrupt iterators.
         let iter = unsafe {
-            policy
-                .table()
-                .iter()
-                .map(|cursor| {
-                    let handle = cursor.element();
-                    (
-                        // Without `.bind` it returns something like `Py(addr)`
-                        handle.key().as_ref().bind(slf.py()),
-                        handle.value().bind(slf.py()),
-                    )
-                })
+            policy.table().iter().map(|cursor| {
+                let handle = cursor.element();
+                (
+                    // Without `.bind` it returns something like `Py(addr)`
+                    handle.key().as_ref().bind(slf.py()),
+                    handle.value().bind(slf.py()),
+                )
+            })
         };
 
         let items = utils::items_to_str(iter, policy.table().len()).unwrap();

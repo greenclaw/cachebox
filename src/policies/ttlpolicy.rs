@@ -225,11 +225,11 @@ impl traits::VacantExt for Vacant<'_> {
 
         let policy = &mut *self.policy;
         let (entries, front_offset) = (&policy.entries, policy.front_offset);
-        policy.table.insert_unique(
-            handle.key().hash(),
-            entries.len() + front_offset,
-            |index| entries[*index - front_offset].key().hash(),
-        );
+        policy
+            .table
+            .insert_unique(handle.key().hash(), entries.len() + front_offset, |index| {
+                entries[*index - front_offset].key().hash()
+            });
         self.policy.entries.push_back(handle);
     }
 }
@@ -302,7 +302,7 @@ impl TTLPolicy {
                 let result = self
                     .table
                     .find_mut(entry.key().hash(), |x| (*x) - front_offset == i)
-                    .expect("index not found");
+                    .expect("decrement_indexes: shifted entry missing from table");
                 *result -= 1;
             }
 
@@ -331,7 +331,7 @@ impl TTLPolicy {
             let front_offset = self.front_offset;
             self.table
                 .find_entry(handle.key().hash(), |index| (*index - front_offset) == 0)
-                .unwrap_or_else(|_| unreachable!("popitem key not found in table"))
+                .unwrap_or_else(|_| unreachable!("expire: front entry missing from table"))
                 .remove();
 
             gv.increment();
@@ -381,8 +381,7 @@ impl PolicyExt for TTLPolicy {
     ) -> pyo3::PyResult<Option<&Self::Handle>> {
         let eq = |index: &usize| get_handle!(&self, *index).key().py_eq(py, key);
 
-        match table::find(&self.table, key.hash(), eq)?.map(|index| get_handle!(&self, *index))
-        {
+        match table::find(&self.table, key.hash(), eq)?.map(|index| get_handle!(&self, *index)) {
             Some(handle) => {
                 if handle.is_expired(std::time::SystemTime::now()) {
                     Ok(None)
@@ -432,7 +431,7 @@ impl PolicyExt for TTLPolicy {
         let front_offset = self.front_offset;
         self.table
             .find_entry(front.key().hash(), |index| *index - front_offset == 0)
-            .unwrap_or_else(|_| unreachable!("popitem key not found in table"))
+            .unwrap_or_else(|_| unreachable!("evict: front entry missing from table"))
             .remove();
 
         shared.generation_version().increment();

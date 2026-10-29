@@ -625,12 +625,12 @@ impl PyCache {
 
         let iter = {
             policy.table().iter().map(|handle| {
-                    (
-                        // Without using `.bind` it returns something like `Py(addr)`
-                        handle.key().as_ref().bind(slf.py()),
-                        handle.value().bind(slf.py()),
-                    )
-                })
+                (
+                    // Without using `.bind` it returns something like `Py(addr)`
+                    handle.key().as_ref().bind(slf.py()),
+                    handle.value().bind(slf.py()),
+                )
+            })
         };
 
         let items = utils::items_to_str(iter, policy.table().len()).unwrap();
@@ -652,7 +652,6 @@ impl PyCache {
         };
 
         for handle in policy.table().iter() {
-
             visit.call(handle.key().as_ref())?;
             visit.call(handle.value())?;
         }
