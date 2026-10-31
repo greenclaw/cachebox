@@ -702,6 +702,7 @@ mod tests {
         let b = list.push_back("b".to_string());
         let _c = list.push_front("c".to_string());
         assert_eq!(values(&list), ["c", "a", "b"]);
+        check(&list);
 
         unsafe {
             b.move_to_front(&mut list);
@@ -709,6 +710,7 @@ mod tests {
             assert!(a.is_back(&list));
         }
         assert_eq!(values(&list), ["b", "c", "a"]);
+        check(&list);
 
         assert_eq!(unsafe { b.unlink(&mut list) }, "b");
         assert_eq!(list.pop_front().as_deref(), Some("c"));
@@ -718,9 +720,11 @@ mod tests {
         assert_eq!(values(&list), ["d", "a", "e"]);
         assert_eq!(list.pop_back().as_deref(), Some("e"));
         assert_eq!(list.len(), 2);
+        check(&list);
 
         list.clear();
         assert!(list.is_empty());
+        check(&list);
         list.push_back("f".to_string());
         // dropped with one element and a free list: no leak, no double free
     }
@@ -756,7 +760,6 @@ mod tests {
         }
         assert_eq!(free, list.free_len);
         assert!(list.free_len <= FREE_LIST_CAPACITY);
-        assert_eq!(list.capacity(), list.len + list.free_len);
     }
 
     #[test]

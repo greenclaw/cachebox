@@ -689,12 +689,13 @@ mod tests {
         // removing the first pending entry moves the last one into its index
         assert_eq!(heap.remove(cursors[1]).label, "n1");
         check(&heap);
-        assert_eq!(heap.remove(cursors[5]).label, "n5"); // last in the buffer
+        assert_eq!(heap.data.last().unwrap().as_ptr(), cursors[4].as_ptr());
+        assert_eq!(heap.remove(cursors[4]).label, "n4"); // last in the buffer
         check(&heap);
         assert_eq!(heap.remove(cursors[0]).label, "n0"); // the root
         check(&heap);
         assert_eq!(heap.len(), 3);
-        assert_eq!(labels(&mut heap), ["n2", "n3", "n4"]);
+        assert_eq!(labels(&mut heap), ["n2", "n3", "n5"]);
     }
 
     #[test]
@@ -748,25 +749,35 @@ mod tests {
         };
 
         for step in 0..400 {
-            match rng.u8(0..8) {
+            match rng.u8(0..9) {
                 0..=2 => {
-                    let c = heap.push(item(rng.u32(0..20), &format!("s{step}")));
+                    let c = heap.push(item(rng.u32(0..20), &format!("s{next_seq}")));
                     live.push((c, next_seq));
                     next_seq += 1;
                 }
                 3 if !live.is_empty() => {
                     let want = extreme(&live, false).unwrap();
                     let it = heap.pop_front().unwrap();
+                    let got = (it.key, it.label);
+                    assert_eq!(
+                        got,
+                        (want.0, format!("s{}", want.1)),
+                        "pop_front at step {step}"
+                    );
                     let pos = live.iter().position(|(_, s)| *s == want.1).unwrap();
                     live.swap_remove(pos);
-                    assert_eq!((it.key, want.1), want, "pop_front at step {step}");
                 }
                 4 if !live.is_empty() => {
                     let want = extreme(&live, true).unwrap();
                     let it = heap.pop_back().unwrap();
+                    let got = (it.key, it.label);
+                    assert_eq!(
+                        got,
+                        (want.0, format!("s{}", want.1)),
+                        "pop_back at step {step}"
+                    );
                     let pos = live.iter().position(|(_, s)| *s == want.1).unwrap();
                     live.swap_remove(pos);
-                    assert_eq!((it.key, want.1), want, "pop_back at step {step}");
                 }
                 5 if !live.is_empty() => {
                     let (c, _) = live.swap_remove(rng.usize(0..live.len()));
