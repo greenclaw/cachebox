@@ -52,6 +52,4 @@ jobs:
 
       - name: "Run cargo miri test"
         # rust-toolchain.toml pins stable; Miri needs nightly
-        run: |
-          cargo +nightly miri setup
-          cargo +nightly miri test --no-default-features --lib
+        run: cargo +nightly miri test --no-default-features --lib
